@@ -1,0 +1,9 @@
+**/node_modules
+**/__pycache__
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache
+frontend/dist
+.git
+.venv
+runs
