@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/MaterialCard.tsx","./src/PartSetup.tsx","./src/PickViewer.tsx","./src/Results.tsx","./src/StudyForm.tsx","./src/Viewer.tsx","./src/api.ts","./src/colormap.ts","./src/main.tsx","./src/types.ts"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/Logo.tsx","./src/MaterialCard.tsx","./src/MaterialPicker.tsx","./src/PartSetup.tsx","./src/PickViewer.tsx","./src/Results.tsx","./src/StudyForm.tsx","./src/Viewer.tsx","./src/api.ts","./src/colormap.ts","./src/main.tsx","./src/sceneKit.ts","./src/types.ts"],"version":"5.9.3"}

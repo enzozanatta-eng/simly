@@ -1,4 +1,4 @@
-import { MaterialCard } from "./MaterialCard";
+import { MaterialButton } from "./MaterialPicker";
 import type { Material, Spec, TemplateName } from "./types";
 
 interface Field {
@@ -37,35 +37,10 @@ export const TEMPLATES: Record<TemplateName, { title: string; fields: Field[]; e
   },
 };
 
-const GROUPS: [Material["category"], string][] = [
-  ["printing_polymer", "3D printing filaments"],
-  ["metal", "Metals"],
-  ["engineering_polymer", "Engineering plastics"],
-];
-
 interface Props {
   spec: Spec;
   materials: Record<string, Material>;
   onChange: (spec: Spec) => void;
-}
-
-/** Material dropdown grouped by family. */
-export function MaterialSelect({ materials, value, onChange }: {
-  materials: Record<string, Material>;
-  value: string;
-  onChange: (key: string) => void;
-}) {
-  return (
-    <select value={value} onChange={(e) => onChange(e.target.value)}>
-      {GROUPS.map(([cat, label]) => (
-        <optgroup key={cat} label={label}>
-          {Object.values(materials).filter((m) => m.category === cat).map((m) => (
-            <option key={m.key} value={m.key}>{m.name}</option>
-          ))}
-        </optgroup>
-      ))}
-    </select>
-  );
 }
 
 /** Editable study parameters: the AI fills them in, the user can adjust any of them. */
@@ -96,12 +71,8 @@ export function StudyForm({ spec, materials, onChange }: Props) {
           <em>{f.unit}</em>
         </label>
       ))}
-      <label className="row">
-        <span>Material</span>
-        <MaterialSelect materials={materials} value={String(spec.material)}
-          onChange={(k) => set("material", k)} />
-      </label>
-      {materials[spec.material] && <MaterialCard material={materials[spec.material]} />}
+      <MaterialButton materials={materials} value={String(spec.material)}
+        onChange={(k) => set("material", k)} />
       <label className="row">
         <span>Mesh</span>
         <select value={spec.mesh} onChange={(e) => set("mesh", e.target.value)}>

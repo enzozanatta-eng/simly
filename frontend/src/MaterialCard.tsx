@@ -10,7 +10,7 @@ const resistivity = (m: Material) =>
     : `~10^${Math.round(Math.log10(m.resistivity))} Ω·m (insulator)`;
 
 /** Property sheet of the selected material, with its source. */
-export function MaterialCard({ material: m }: { material: Material }) {
+export function MaterialCard({ material: m, open = false }: { material: Material; open?: boolean }) {
   const printed = m.category === "printing_polymer";
   const rows: [string, string][] = [
     ["Young's modulus", printed
@@ -30,7 +30,7 @@ export function MaterialCard({ material: m }: { material: Material }) {
     ["Electrical", resistivity(m)],
   ];
   return (
-    <details className="material">
+    <details className="material" open={open}>
       <summary>{m.name}{m.condition ? ` · ${m.condition}` : ""}</summary>
       <table>
         <tbody>

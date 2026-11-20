@@ -140,6 +140,7 @@ def markers(mesh: Mesh, forces: np.ndarray, res: FieldResult) -> dict:
             "centre": np.round(centre, 4).tolist(),
             "direction": np.round(direction, 6).tolist(),
             "pulling": bool(np.dot(direction, normal) > 0.5),
+            "magnitude_N": round(float(np.linalg.norm(f)), 4),
             "displacement": np.round(res.displacement[nodes].mean(axis=0), 7).tolist(),
         })
     centre, normal = face_info("fixed")

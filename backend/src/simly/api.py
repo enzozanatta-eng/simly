@@ -217,3 +217,7 @@ if FRONTEND_DIST.is_dir():  # pragma: no cover - depends on a built frontend
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(FRONTEND_DIST / "index.html")
+
+    @app.get("/favicon.svg")
+    def favicon() -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "favicon.svg", media_type="image/svg+xml")

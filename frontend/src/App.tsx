@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "./api";
 import { Legend, Results } from "./Results";
 import { StudyForm, TEMPLATES } from "./StudyForm";
+import { Logo } from "./Logo";
 import { PartSetup } from "./PartSetup";
 import type { CustomSpec, Health, Material, Spec, StudyResult } from "./types";
 import { Viewer } from "./Viewer";
@@ -28,6 +29,10 @@ export default function App() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [mode, setMode] = useState<"part" | "examples">("part");
+  // in "Your part" mode the stage shows either the face-picking view or the results
+  const [partView, setPartView] = useState<"setup" | "results">("setup");
+  const [resultMode, setResultMode] = useState<"part" | "examples">("part");
+  const [stageEl, setStageEl] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null));
@@ -49,7 +54,11 @@ export default function App() {
   async function simulate(s: Spec | CustomSpec) {
     setExplanation("");
     const r = await run("simulate", () => api.simulate(s, convergence));
-    if (r) setResult(r);
+    if (r) {
+      setResult(r);
+      setResultMode(s.template === "custom_part" ? "part" : "examples");
+      if (s.template === "custom_part") setPartView("results");
+    }
   }
 
   async function planAndSimulate() {
@@ -71,11 +80,13 @@ export default function App() {
   }
 
   const aiReady = Boolean(health?.ai_provider);
+  const showSetupStage = mode === "part" && (partView === "setup" || resultMode !== "part" || !result);
+  const showResult = result && !showSetupStage && (mode === resultMode);
 
   return (
     <div className="app">
       <header>
-        <h1>Simly</h1>
+        <h1><Logo /> Simly</h1>
         <p>Describe a part. Get a verified simulation, explained like in class.</p>
         {health && (
           <ul className="status">
@@ -101,7 +112,8 @@ export default function App() {
 
           {mode === "part" ? (
             <section>
-              <PartSetup materials={materials} busy={busy !== null} onSimulate={simulate} />
+              <PartSetup materials={materials} busy={busy !== null} onSimulate={simulate}
+                stage={showSetupStage ? stageEl : null} />
             </section>
           ) : (
             <>
@@ -142,8 +154,15 @@ export default function App() {
         </aside>
 
         <section className="stage">
-          {result ? (
+          {showSetupStage ? (
+            <div className="stage-slot" ref={setStageEl}>
+              {busy === "simulate" && <div className="busy-veil">Meshing and solving…</div>}
+            </div>
+          ) : showResult && result ? (
             <>
+              {resultMode === "part" && (
+                <button className="back" onClick={() => setPartView("setup")}>← Back to supports and loads</button>
+              )}
               <div className="viewer-wrap">
                 <Viewer display={result.display} exaggeration={exaggeration} />
                 <div className="overlay">

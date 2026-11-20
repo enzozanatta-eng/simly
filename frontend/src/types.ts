@@ -39,7 +39,9 @@ export interface Display {
   displacement: number[];
   von_mises: number[];
   range: [number, number];
-  loads: { centre: number[]; direction: number[]; pulling: boolean; displacement: number[] }[];
+  loads: {
+    centre: number[]; direction: number[]; pulling: boolean; displacement: number[]; magnitude_N: number;
+  }[];
   fixed: { centre: number[]; normal: number[] }[];
   size: number;
 }
