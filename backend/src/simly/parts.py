@@ -160,6 +160,46 @@ def face_groups(part_id: str) -> dict[int, list[int]] | None:
     return {int(k): v for k, v in json.loads(f.read_text()).items()}
 
 
+def _feature_edges(gmsh, groups, nodes, index, scale):
+    """Curves where two different user faces meet (or the boundary of an open face).
+
+    Curves that only separate patches of the same face are not offered for picking.
+    """
+    group_of = {m: g for g, members in groups.items() for m in members}
+    edges, segments, owner, corner_tags = [], [], [], set()
+    for _, curve in gmsh.model.getEntities(1):
+        up, _down = gmsh.model.getAdjacencies(1, curve)
+        faces_here = {group_of.get(int(t), int(t)) for t in up}
+        if len(faces_here) < 2 and len(up) != 1:
+            continue
+        _, node_tags = gmsh.model.mesh.getElementsByType(1, curve)
+        if len(node_tags) == 0:
+            continue
+        seg = np.array([index[int(t)] for t in node_tags]).reshape(-1, 2)
+        a, b = nodes[seg[:, 0]], nodes[seg[:, 1]]
+        lengths = np.linalg.norm(b - a, axis=1)
+        mid = ((a + b) / 2 * lengths[:, None]).sum(axis=0) / lengths.sum()
+        chord = nodes[seg[-1, 1]] - nodes[seg[0, 0]]
+        straight = abs(np.linalg.norm(chord) - lengths.sum()) < 1e-3 * lengths.sum()
+        edges.append({
+            "id": int(curve),
+            "length_mm": round(float(lengths.sum()), 4),
+            "midpoint": np.round(mid, 4).tolist(),
+            "direction": np.round(chord / (np.linalg.norm(chord) or 1.0), 5).tolist()
+            if straight else None,
+            "faces": sorted(faces_here),
+        })
+        segments.extend(np.round(np.hstack([a, b]), 4).ravel().tolist())
+        owner.extend([int(curve)] * len(seg))
+        _, down = gmsh.model.getAdjacencies(1, curve)
+        corner_tags.update(int(t) for t in down)
+    vertices = []
+    for tag in sorted(corner_tags):
+        x, y, z = gmsh.model.getValue(0, tag, [])
+        vertices.append({"id": tag, "point": [round(v * scale, 4) for v in (x, y, z)]})
+    return edges, segments, owner, vertices
+
+
 def bbox(gmsh) -> np.ndarray:
     x0, y0, z0, x1, y1, z1 = gmsh.model.getBoundingBox(-1, -1)
     return np.array([[x0, y0, z0], [x1, y1, z1]])
@@ -225,6 +265,8 @@ def describe_part(part_id: str, units: str = "mm") -> dict:
                 })
                 positions_idx.append(tris)
                 face_of_tri += [fid] * len(tris)
+            edges, edge_segments, edge_of_segment, vertices = _feature_edges(
+                gmsh, groups, nodes, index, scale)
         finally:
             gmsh.finalize()
 
@@ -237,10 +279,14 @@ def describe_part(part_id: str, units: str = "mm") -> dict:
         "bbox_mm": {"min": np.round(lo, 4).tolist(), "max": np.round(hi, 4).tolist(),
                     "size": np.round(hi - lo, 4).tolist()},
         "faces": faces,
+        "edges": edges,
+        "vertices": vertices,
         "display": {
             "positions": np.round(nodes[used], 4).ravel().tolist(),
             "indices": inverse.astype(int).ravel().tolist(),
             "face_of_triangle": face_of_tri,
+            "edge_segments": edge_segments,
+            "edge_of_segment": edge_of_segment,
         },
     }
     (path.parent / "faces.json").write_text(json.dumps({str(k): v for k, v in groups.items()}))

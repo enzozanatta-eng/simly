@@ -18,6 +18,8 @@ def make_part(path: Path, shape: str = "box") -> Path:
             occ.fuse([(3, base)], [(3, leg)])
             hole = occ.addCylinder(-1, 20, 40, 8, 0, 0, 5)
             occ.cut(occ.getEntities(3), [(3, hole)])
+        elif shape == "shaft":  # round bar, diameter 20 mm, length 200 mm along x
+            occ.addCylinder(0, 0, 0, 200, 0, 0, 10)
         occ.synchronize()
         if path.suffix == ".stl":
             gmsh.option.setNumber("Mesh.MeshSizeMax", 10)

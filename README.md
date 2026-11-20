@@ -10,16 +10,38 @@ element analysis, so they guess, print and hope. Simly answers in seconds:
 describe the part in plain language, and it sets up the study, runs a real
 solver, and tells you whether it holds, how sure it is, and why.
 
-<p align="center"><img src="docs/your-part.png" width="900"></p>
+<p align="center"><img src="docs/setup.png" width="900"></p>
 
 ## Your own part
 
-Upload an **STL or STEP** file, click the faces that are **held fixed** and
-the faces where **loads** act (force in N, along an axis or pushing/pulling on
-the face), pick a material, and simulate. The STL triangles carry no face
-information, so Simly recovers the faces a person would click on by splitting
-the surface at sharp edges (dihedral angle above 40°) and orients each face
-outwards with a winding-number test.
+Drop an **STL or STEP** file and set the study up in one of two ways:
+
+* **Describe it**: "screwed to the wall through the hole, a 5 kg box sits on
+  the top shelf, PETG". The AI reads the part's faces and edges (ids, sizes,
+  positions, outward normals) and proposes supports, loads and material, with a
+  short rationale. The proposal is validated like a hand-made one and shown on
+  the part for you to check and edit.
+* **Pick it**: a selection filter switches between **faces, edges and points**
+  (points snap to the part's corners). Navigation works like CAD: free
+  rotation, pan, zoom towards the cursor, double-click to focus, and an NX-style
+  triad in the corner whose axes you click to look along them.
+
+| Supports | Loads |
+|---|---|
+| fixed, or held in any of X / Y / Z only (rollers, sliding contact) | **force** (N), or the **weight** of a mass (kg) |
+| on faces, edges or points | **pressure** (MPa), normal to the surface everywhere, curved faces included |
+| | **moment** (N·m, right-hand rule) on a face or an edge |
+| | on faces, edges or points, along an axis, the face normal or any vector |
+
+Under the hood every load becomes *consistent* nodal forces for quadratic
+elements (mid-side nodes of a 6-node triangle take A/3; a 3-node edge splits
+L/6, 4L/6, L/6). A moment is applied as the force distribution of a rigid
+twist about the selection's centroid, solved so that the resultant moment is
+exactly the one requested and the resultant force exactly zero.
+
+The STL triangles carry no face information, so Simly recovers the faces a
+person would click on by splitting the surface at sharp edges (dihedral angle
+above 40°) and orients each face outwards with a winding-number test.
 
 An arbitrary shape has no textbook formula, so two checks replace it:
 
@@ -55,9 +77,14 @@ Run on the default examples (medium mesh unless noted):
 | | same, mesh study (GCI) | | 68.63 MPa ± 0.50% | |
 | Same steel beam uploaded as STEP, faces picked | tip deflection | 0.7478 mm | 0.7445 mm | −0.44% |
 | Same beam uploaded as STL | tip deflection | 0.7478 mm | 0.7445 mm | −0.44% |
+| Steel shaft Ø20 × 200 mm (STEP), 50 N·m torque on the end face | twist angle, T·L/(G·J) | 7.882 mrad | 8.099 mrad | +2.7% |
+| | shear stress, 16T/(πd³), as von Mises √3·τ | 55.13 MPa | 56.66 MPa | +2.8% |
 
 The plate's residual difference is expected: Heywood's Kt is itself an
-empirical fit, accurate to a few percent.
+empirical fit, accurate to a few percent. The shaft's comes from meshing a
+circle with straight-sided triangles at the default size; the fine mesh and the
+GCI study show it shrinking. Line loads, point loads and pressure are checked
+against the same beam theory and against their resultants in the test suite.
 
 ## The materials library
 
@@ -154,7 +181,8 @@ backend/src/simly/
   spec.py         study specs and their validation rules
   materials.py    material library with sources
   geometry.py     template geometry + Gmsh meshing (thread-safe)
-  parts.py        uploaded STL/STEP: storage, face detection, outward normals
+  parts.py        uploaded STL/STEP: storage, face/edge detection, outward normals
+  loads.py        consistent nodal loads: force, pressure, moment on faces/edges/points
   solver.py       CalculiX deck, consistent traction loads, .frd reader
   templates.py    boundary conditions and hand calculations per template
   study.py        spec -> mesh -> solve -> results, strength checks

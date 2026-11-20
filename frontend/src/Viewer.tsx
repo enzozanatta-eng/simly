@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { ArcballControls } from "three/examples/jsm/controls/ArcballControls.js";
 import { turbo } from "./colormap";
-import { AxisGizmo, directionName, forceArrow, setView, supportPlate, type ViewName } from "./sceneKit";
+import {
+  AxisGizmo, bindGizmo, cadControls, directionName, forceArrow, setView, supportPlate,
+} from "./sceneKit";
 import type { Display } from "./types";
 
 interface Props {
@@ -15,15 +17,13 @@ interface SceneState {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
-  controls: OrbitControls;
+  controls: ArcballControls;
   part?: THREE.Mesh;
   markers?: THREE.Group;
   arrows: THREE.Group[];
   center: THREE.Vector3;
   radius: number;
 }
-
-const VIEWS: [ViewName, string][] = [["iso", "Iso"], ["front", "Front"], ["top", "Top"], ["right", "Right"]];
 
 const fmtN = (n: number) => (n >= 1000 ? `${Number((n / 1000).toPrecision(3))} kN` : `${Number(n.toPrecision(3))} N`);
 
@@ -47,8 +47,7 @@ export function Viewer({ display, exaggeration }: Props) {
     scene.add(sun);
 
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 1e7);
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
+    const controls = cadControls(camera, renderer.domElement, scene);
     state.current = { renderer, scene, camera, controls, arrows: [],
       center: new THREE.Vector3(), radius: 1 };
 
@@ -63,9 +62,12 @@ export function Viewer({ display, exaggeration }: Props) {
     resize();
 
     const gizmo = new AxisGizmo();
+    const unbind = bindGizmo(renderer.domElement, gizmo, (v) => {
+      const s = state.current!;
+      setView(s.camera, s.controls, s.center, s.radius, v);
+    });
     let frame = 0;
     const loop = () => {
-      controls.update();
       renderer.clear();
       renderer.render(scene, camera);
       gizmo.render(renderer, camera);
@@ -75,6 +77,7 @@ export function Viewer({ display, exaggeration }: Props) {
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
+      unbind();
       controls.dispose();
       renderer.dispose();
       el.removeChild(renderer.domElement);
@@ -113,17 +116,20 @@ export function Viewer({ display, exaggeration }: Props) {
     const markers = new THREE.Group();
     s.arrows = display.loads.map((ld) => {
       const dir = ld.direction as [number, number, number];
+      const moment = ld.kind === "moment";
+      const normal = (ld.normal ?? dir.map((v) => -v)) as [number, number, number];
       const g = forceArrow({
-        at: ld.centre as [number, number, number], dir,
-        normal: (ld.pulling ? dir : dir.map((v) => -v)) as [number, number, number],
-        label: `${fmtN(ld.magnitude_N)} ${directionName(dir)}`,
+        at: ld.centre as [number, number, number], dir, normal, moment,
+        label: moment
+          ? `M ${Number((ld.magnitude / 1000).toPrecision(3))} N·m ${directionName(dir)}`
+          : `${fmtN(ld.magnitude)} ${directionName(dir)}`,
       }, 0.45 * s.radius);
       markers.add(g);
       return g;
     });
     for (const fx of display.fixed) {
       markers.add(supportPlate(fx.centre as [number, number, number],
-        fx.normal as [number, number, number], 0.35 * s.radius));
+        (fx.normal ?? [0, 0, 1]) as [number, number, number], 0.35 * s.radius, fx.entity, fx.dofs));
     }
     s.markers = markers;
     s.scene.add(markers);
@@ -151,17 +157,9 @@ export function Viewer({ display, exaggeration }: Props) {
     });
   }, [display, exaggeration]);
 
-  const view = (v: ViewName) => {
-    const s = state.current;
-    if (s) setView(s.camera, s.controls, s.center, s.radius, v);
-  };
-
   return (
     <div className="viewer-shell">
       <div className="viewer" ref={host} />
-      <div className="views">
-        {VIEWS.map(([v, label]) => <button key={v} onClick={() => view(v)}>{label}</button>)}
-      </div>
     </div>
   );
 }

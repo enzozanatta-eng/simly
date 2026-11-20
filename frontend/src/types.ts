@@ -40,23 +40,38 @@ export interface Display {
   von_mises: number[];
   range: [number, number];
   loads: {
-    centre: number[]; direction: number[]; pulling: boolean; displacement: number[]; magnitude_N: number;
+    centre: number[]; normal: number[] | null; entity: Entity; kind: "force" | "moment";
+    direction: number[]; magnitude: number; displacement: number[];
   }[];
-  fixed: { centre: number[]; normal: number[] }[];
+  fixed: { centre: number[]; normal: number[] | null; entity: Entity; dofs: number[]; displacement: number[] }[];
   size: number;
 }
 
-export interface FaceLoad {
-  faces: number[];
-  force: [number, number, number];
+export type Entity = "face" | "edge" | "point";
+export type Vec3 = [number, number, number];
+
+export interface SupportSpec {
+  entity: Entity;
+  ids: number[];
+  point: Vec3 | null;
+  dofs: number[];
+}
+
+export interface LoadSpec {
+  entity: Entity;
+  ids: number[];
+  point: Vec3 | null;
+  kind: "force" | "moment" | "pressure";
+  vector: Vec3 | null;
+  pressure: number | null;
 }
 
 export interface CustomSpec {
   template: "custom_part";
   part_id: string;
   units: Units;
-  fixed_faces: number[];
-  loads: FaceLoad[];
+  supports: SupportSpec[];
+  loads: LoadSpec[];
   material: string;
   mesh: MeshLevel;
 }
@@ -70,12 +85,25 @@ export interface PartFace {
   normal: number[];
 }
 
+export interface PartEdge {
+  id: number;
+  length_mm: number;
+  midpoint: number[];
+  direction: number[] | null;
+  faces: number[];
+}
+
 export interface PartInfo {
   part_id: string;
   units: Units;
   bbox_mm: { min: number[]; max: number[]; size: number[] };
   faces: PartFace[];
-  display: { positions: number[]; indices: number[]; face_of_triangle: number[] };
+  edges: PartEdge[];
+  vertices: { id: number; point: number[] }[];
+  display: {
+    positions: number[]; indices: number[]; face_of_triangle: number[];
+    edge_segments: number[]; edge_of_segment: number[];
+  };
 }
 
 export interface StudyResult {

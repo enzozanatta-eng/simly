@@ -11,6 +11,16 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 from .geometry import Mesh
+from .loads import (
+    Mark,
+    distribute_force,
+    edge_weights,
+    face_normal,
+    face_weights,
+    moment_forces,
+    point_node,
+    pressure_forces,
+)
 from .materials import MATERIALS
 from .solver import Constraint, FieldResult, face_area, traction_loads
 from .spec import CantileverBeam, CustomPart, PlateWithHole
@@ -44,9 +54,21 @@ def _nodes_of(mesh: Mesh, face: str) -> np.ndarray:
 
 # ------------------------------------------------------------- cantilever beam
 
-def beam_setup(s: CantileverBeam, mesh: Mesh) -> tuple[list[Constraint], np.ndarray]:
+Setup = tuple[list[Constraint], np.ndarray, list[Mark]]
+
+
+def _face_mark(mesh: Mesh, name: str, kind: str, vector=None, dofs=(1, 2, 3)) -> Mark:
+    nodes = _nodes_of(mesh, name)
+    return Mark(kind, nodes, mesh.nodes[nodes].mean(axis=0), face_normal(mesh, name),
+                None if vector is None else np.asarray(vector, float), tuple(dofs))
+
+
+def beam_setup(s: CantileverBeam, mesh: Mesh) -> Setup:
     traction = np.array([0.0, 0.0, -s.load / face_area(mesh, "load")])
-    return [Constraint(_nodes_of(mesh, "fixed"), (1, 2, 3))], traction_loads(mesh, "load", traction)
+    marks = [_face_mark(mesh, "fixed", "support"),
+             _face_mark(mesh, "load", "force", (0, 0, -s.load))]
+    return ([Constraint(_nodes_of(mesh, "fixed"), (1, 2, 3))],
+            traction_loads(mesh, "load", traction), marks)
 
 
 def beam_checks(s: CantileverBeam, mesh: Mesh, res: FieldResult) -> list[Comparison]:
@@ -85,7 +107,7 @@ def beam_checks(s: CantileverBeam, mesh: Mesh, res: FieldResult) -> list[Compari
 
 # ------------------------------------------------------------- plate with hole
 
-def plate_setup(s: PlateWithHole, mesh: Mesh) -> tuple[list[Constraint], np.ndarray]:
+def plate_setup(s: PlateWithHole, mesh: Mesh) -> Setup:
     fixed = _nodes_of(mesh, "fixed")
     p = mesh.nodes[fixed]
 
@@ -102,7 +124,9 @@ def plate_setup(s: PlateWithHole, mesh: Mesh) -> tuple[list[Constraint], np.ndar
         Constraint(corner, (3,)),
     ]
     traction = np.array([s.load / face_area(mesh, "load"), 0.0, 0.0])
-    return constraints, traction_loads(mesh, "load", traction)
+    marks = [_face_mark(mesh, "fixed", "support", dofs=(1,)),
+             _face_mark(mesh, "load", "force", (s.load, 0, 0))]
+    return constraints, traction_loads(mesh, "load", traction), marks
 
 
 def plate_checks(s: PlateWithHole, mesh: Mesh, res: FieldResult) -> list[Comparison]:
@@ -129,12 +153,48 @@ def plate_checks(s: PlateWithHole, mesh: Mesh, res: FieldResult) -> list[Compari
 
 # ------------------------------------------------------------- custom part
 
-def custom_setup(s: CustomPart, mesh: Mesh) -> tuple[list[Constraint], np.ndarray]:
-    forces = np.zeros_like(mesh.nodes)
+def custom_setup(s: CustomPart, mesh: Mesh) -> Setup:
+    n = len(mesh.nodes)
+    constraints, marks = [], []
+    forces = np.zeros((n, 3))
+
+    def weighted(sel, name):
+        return face_weights(mesh, name) if sel.entity == "face" else edge_weights(mesh, name)
+
+    for i, sup in enumerate(s.supports):
+        if sup.entity == "point":
+            node = point_node(mesh, sup.point)
+            nodes, centre, normal = np.array([node]), mesh.nodes[node], None
+        else:
+            sel = weighted(sup, f"sup{i}")
+            nodes, centre = sel.nodes, sel.centre
+            normal = face_normal(mesh, f"sup{i}") if sup.entity == "face" else None
+        constraints.append(Constraint(nodes, tuple(sup.dofs)))
+        marks.append(Mark("support", nodes, centre, normal, None, tuple(sup.dofs), sup.entity))
+
     for i, ld in enumerate(s.loads):
-        face = f"load{i}"
-        forces += traction_loads(mesh, face, np.asarray(ld.force) / face_area(mesh, face))
-    return [Constraint(_nodes_of(mesh, "fixed"), (1, 2, 3))], forces
+        name = f"load{i}"
+        if ld.entity == "point":
+            node = point_node(mesh, ld.point)
+            f = np.zeros((n, 3))
+            f[node] = ld.vector
+            nodes, centre, normal = np.array([node]), mesh.nodes[node], None
+        else:
+            sel = weighted(ld, name)
+            nodes, centre = sel.nodes, sel.centre
+            normal = face_normal(mesh, name) if ld.entity == "face" else None
+            if ld.kind == "force":
+                f = distribute_force(n, sel, ld.vector)
+            elif ld.kind == "moment":
+                f = moment_forces(n, sel, ld.vector)
+            else:
+                f = pressure_forces(mesh, name, ld.pressure)
+        forces += f
+        vector = (np.asarray(ld.vector, float) if ld.kind != "pressure"
+                  else f[nodes].sum(axis=0))
+        marks.append(Mark("moment" if ld.kind == "moment" else "force", nodes, centre, normal,
+                          vector, entity=ld.entity))
+    return constraints, forces, marks
 
 
 def custom_checks(s: CustomPart, mesh: Mesh, res: FieldResult) -> list[Comparison]:

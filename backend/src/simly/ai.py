@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from .llm import LLMClient, LLMError, Tool, ToolResult, Turn, UserText, inline_refs
 from .materials import MATERIALS
-from .spec import TEMPLATES, parse_spec
+from .spec import TEMPLATES, CustomPart, Load, Support, parse_spec
 
 PLAN_PROMPT = f"""\
 You set up structural simulations for Simly, a teaching tool. A teacher or
@@ -134,3 +134,103 @@ def explain_results(request: str, result: dict, client: LLMClient) -> str:
     if not text:
         raise LLMError("empty explanation")
     return text
+
+
+# ---------------------------------------------------------------- uploaded parts
+
+PART_PROMPT = f"""\
+You set up a structural simulation on a part the user uploaded to Simly.
+You get a list of the part's faces and edges (ids, sizes, positions, outward
+normals, all in mm) and the user's description of how the part is held and
+loaded. Decide which faces/edges/points are supported and which are loaded.
+
+Rules:
+- Supports: "fixed" = dofs [1,2,3]. A face resting on a surface but free to slide
+  holds only the direction of its normal (e.g. dofs [3] for a face with normal +/-Z).
+  The part must be held well enough not to move as a rigid body.
+- Screws or bolts through a hole: support the hole's cylindrical face(s).
+- Loads: kind "force" (vector in N), "moment" (vector in N mm, right-hand rule,
+  on a face or edge), or "pressure" (MPa, on faces, pushing into them).
+- A mass of m kg resting or hanging gives a force of m * 9.81 N downwards (-Z),
+  unless the user says the part is oriented differently.
+- Loads spread over a face unless the user describes a point or an edge.
+- Point selections use coordinates in mm on the part's surface.
+- Materials (use the key): {"; ".join(f"{k} = {m.name}" for k, m in MATERIALS.items())}.
+  For "3D printed" with no filament named use pla.
+- Explain your choices briefly in "rationale", naming the faces you used.
+- If a proposal is rejected, read the reason and fix it.
+"""
+
+
+def part_summary(info: dict, max_faces: int = 150, max_edges: int = 250) -> str:
+    """Compact text description of a part for the model."""
+    def v(x):
+        return "(" + ", ".join(f"{c:.4g}" for c in x) + ")"
+
+    lines = [f"Bounding box (mm): min {v(info['bbox_mm']['min'])}, max {v(info['bbox_mm']['max'])}"]
+    lines.append("Faces: id | area mm2 | centroid | outward normal")
+    for f in sorted(info["faces"], key=lambda f: -f["area_mm2"])[:max_faces]:
+        lines.append(f"  {f['id']} | {f['area_mm2']:.4g} | {v(f['centroid'])} | {v(f['normal'])}")
+    lines.append("Edges: id | length mm | midpoint | direction (straight edges) | faces it joins")
+    for e in sorted(info["edges"], key=lambda e: -e["length_mm"])[:max_edges]:
+        d = v(e["direction"]) if e["direction"] else "curved"
+        mid = v(e["midpoint"])
+        lines.append(f"  {e['id']} | {e['length_mm']:.4g} | {mid} | {d} | {e['faces']}")
+    return "\n".join(lines)
+
+
+def _part_tool() -> Tool:
+    schema = {
+        "type": "object",
+        "properties": {
+            "supports": {"type": "array", "items": inline_refs(Support.model_json_schema())},
+            "loads": {"type": "array", "items": inline_refs(Load.model_json_schema())},
+            "material": {"type": "string", "enum": list(MATERIALS)},
+            "rationale": {"type": "string"},
+        },
+        "required": ["supports", "loads", "material", "rationale"],
+    }
+    return Tool("propose_part_setup", "Supports, loads and material for the uploaded part.", schema)
+
+
+PART_TOOL = _part_tool()
+
+
+@dataclass
+class PartPlan:
+    spec: CustomPart
+    rationale: str
+    attempts: list[dict] = field(default_factory=list)
+
+
+def plan_part(request: str, info: dict, client: LLMClient, mesh: str = "medium",
+              max_attempts: int = 3) -> PartPlan:
+    face_ids = {f["id"] for f in info["faces"]}
+    edge_ids = {e["id"] for e in info["edges"]}
+    history: list[Turn] = [UserText(f"{part_summary(info)}\n\nUser: {request}")]
+    attempts: list[dict] = []
+    for _ in range(max_attempts):
+        call = client.call(PART_PROMPT, history, [PART_TOOL, DECLINE])
+        if call.name == DECLINE.name:
+            raise Declined(call.input.get("reason", ""), call.input.get("closest_template"))
+        try:
+            spec = CustomPart(part_id=info["part_id"], units=info["units"], mesh=mesh,
+                              supports=call.input.get("supports", []),
+                              loads=call.input.get("loads", []),
+                              material=call.input.get("material", "pla"))
+            unknown = [
+                f"{sel.entity} {i}" for sel in [*spec.supports, *spec.loads] for i in sel.ids
+                if (sel.entity == "face" and i not in face_ids)
+                or (sel.entity == "edge" and i not in edge_ids)
+            ]
+            if unknown:
+                raise ValueError(f"these ids do not exist on the part: {', '.join(unknown)}")
+        except (ValidationError, ValueError) as e:
+            reason = _explain_error(e) if isinstance(e, ValidationError) else str(e)
+            attempts.append({"proposal": call.input, "error": reason})
+            history += [call, ToolResult(call.id, f"Rejected: {reason}", True)]
+            continue
+        attempts.append({"proposal": call.input, "error": None})
+        return PartPlan(spec, call.input.get("rationale", ""), attempts)
+    raise NoValidSpec(f"no valid setup after {max_attempts} attempts; last error: "
+                      f"{attempts[-1]['error'] if attempts else '-'}")

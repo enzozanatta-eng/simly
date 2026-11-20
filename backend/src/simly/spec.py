@@ -94,19 +94,59 @@ class PlateWithHole(BaseModel):
         return self
 
 
-class FaceLoad(BaseModel):
-    faces: list[int] = Field(..., min_length=1)
-    force: tuple[float, float, float] = Field(..., description="total force in N (x, y, z)")
+Vec3 = tuple[float, float, float]
+
+
+class Selection(BaseModel):
+    """Where a support or load acts: faces, edges (by id) or one point (coordinates in mm)."""
+
+    entity: Literal["face", "edge", "point"] = "face"
+    ids: list[int] = Field(default_factory=list, description="face or edge ids")
+    point: Vec3 | None = Field(None, description="mm, for entity 'point'")
 
     @model_validator(mode="after")
-    def _nonzero(self) -> FaceLoad:
-        if not any(self.force):
-            raise ValueError("a load needs a non-zero force")
+    def _target(self):
+        if self.entity == "point":
+            if self.point is None:
+                raise ValueError("a point selection needs coordinates")
+        elif not self.ids:
+            raise ValueError(f"select at least one {self.entity}")
+        return self
+
+    def key(self) -> tuple:
+        return (self.entity, tuple(sorted(self.ids)), self.point)
+
+
+class Support(Selection):
+    """Held in the directions listed in ``dofs`` (1 = x, 2 = y, 3 = z); all three = fixed."""
+
+    dofs: list[Literal[1, 2, 3]] = Field(default_factory=lambda: [1, 2, 3], min_length=1)
+
+
+class Load(Selection):
+    """A force (N), a moment (N mm, right-hand rule) or a pressure (MPa, into the face)."""
+
+    kind: Literal["force", "moment", "pressure"] = "force"
+    vector: Vec3 | None = Field(None, description="force in N or moment in N mm")
+    pressure: float | None = Field(None, description="MPa, pushes into the selected faces")
+
+    @model_validator(mode="after")
+    def _value(self):
+        if self.kind == "pressure":
+            if self.entity != "face" or not self.pressure:
+                raise ValueError("a pressure acts on faces and needs a non-zero value in MPa")
+        else:
+            if self.vector is None or not any(self.vector):
+                raise ValueError(f"a {self.kind} needs a non-zero vector")
+            if self.kind == "moment" and self.entity == "point":
+                raise ValueError("a moment needs a face or an edge to act on; solid "
+                                 "elements have no rotation at a single point")
         return self
 
 
 class CustomPart(BaseModel):
-    """A part uploaded by the user (STL/STEP), with supports and loads on chosen faces.
+    """A part uploaded by the user (STL/STEP), with supports and loads on chosen
+    faces, edges or points.
 
     There is no textbook formula for an arbitrary shape, so the checks are force
     equilibrium and the mesh convergence study.
@@ -115,22 +155,24 @@ class CustomPart(BaseModel):
     template: Literal["custom_part"] = "custom_part"
     part_id: str = Field(..., pattern=r"^[0-9a-f]{16}$")
     units: Literal["mm", "cm", "m", "in"] = "mm"
-    fixed_faces: list[int] = Field(..., min_length=1)
-    loads: list[FaceLoad] = Field(..., min_length=1, max_length=10)
+    supports: list[Support] = Field(..., min_length=1, max_length=20)
+    loads: list[Load] = Field(..., min_length=1, max_length=20)
     material: MaterialKey = "pla"
     mesh: MeshLevel = "medium"
 
     @model_validator(mode="after")
-    def _faces(self) -> CustomPart:
-        loaded = {f for ld in self.loads for f in ld.faces}
-        both = loaded & set(self.fixed_faces)
+    def _distinct(self):
+        held = {(s.entity, i) for s in self.supports for i in s.ids}
+        loaded = {(ld.entity, i) for ld in self.loads for i in ld.ids}
+        both = sorted(held & loaded)
         if both:
-            raise ValueError(f"face(s) {sorted(both)} are both fixed and loaded")
+            names = ", ".join(f"{e} {i}" for e, i in both)
+            raise ValueError(f"{names} is both supported and loaded")
         return self
 
     @property
     def load(self) -> float:
-        total = [sum(ld.force[i] for ld in self.loads) for i in range(3)]
+        total = [sum(ld.vector[i] for ld in self.loads if ld.kind == "force") for i in range(3)]
         return sum(c * c for c in total) ** 0.5
 
 

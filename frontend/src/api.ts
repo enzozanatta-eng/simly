@@ -46,6 +46,8 @@ export const api = {
     return data as PartInfo;
   },
   part: (id: string, units: Units) => call<PartInfo>(`/api/parts/${id}?units=${units}`),
+  planPart: (prompt: string, partId: string, units: Units, mesh: string) =>
+    call<{ spec: CustomSpec; rationale: string }>("/api/plan_part", { prompt, part_id: partId, units, mesh }),
   simulate: (spec: Spec | CustomSpec, convergence: boolean) =>
     call<StudyResult>("/api/simulate", { spec, convergence }),
   explain: (prompt: string, result: StudyResult) =>

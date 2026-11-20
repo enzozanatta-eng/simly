@@ -14,7 +14,8 @@ import numpy as np
 from .spec import CantileverBeam, PlateWithHole
 
 LEVEL_FACTOR = {"coarse": 1.5, "medium": 1.0, "fine": 1 / 1.5}
-GMSH_TET10, GMSH_TRI6 = 11, 9
+GMSH_TET10, GMSH_TRI6, GMSH_LINE3 = 11, 9, 8
+EDGE = "edge:"  # prefix of named curve groups (faces are named without a prefix)
 # Gmsh 10-node tet -> CalculiX C3D10 node order (last two mid-edge nodes swap)
 TET10_TO_CCX = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]
 
@@ -26,7 +27,8 @@ _GMSH_LOCK = threading.Lock()
 class Mesh:
     nodes: np.ndarray  # (N, 3) coordinates, mm
     tets: np.ndarray  # (M, 10) node indices, Gmsh order
-    faces: dict[str, np.ndarray] = field(default_factory=dict)  # name -> (K, 6) tri6
+    faces: dict[str, np.ndarray] = field(default_factory=dict)  # name -> (K, 6) tri6, outward
+    edges: dict[str, np.ndarray] = field(default_factory=dict)  # name -> (K, 3) line3
     skin: np.ndarray | None = None  # (K, 6) all boundary triangles, for display
 
     @property
@@ -104,14 +106,20 @@ def _build_custom(gmsh, s) -> dict[str, list[int]]:
 
     import_part(gmsh, part_file(s.part_id))
     surfaces = {t for _, t in gmsh.model.getEntities(2)}
+    curves = {t for _, t in gmsh.model.getEntities(1)}
     groups = face_groups(s.part_id) or {t: [t] for t in surfaces}
-    wanted = set(s.fixed_faces) | {f for ld in s.loads for f in ld.faces}
-    missing = wanted - set(groups)
-    if missing:
-        raise MeshError(f"face id(s) {sorted(missing)} do not exist on this part")
 
-    def expand(face_ids: list[int]) -> list[int]:
-        return [m for f in face_ids for m in groups[f]]
+    def resolve(sel, name: str, named: dict) -> None:
+        if sel.entity == "face":
+            missing = set(sel.ids) - set(groups)
+            if missing:
+                raise MeshError(f"face id(s) {sorted(missing)} do not exist on this part")
+            named[name] = [m for f in sel.ids for m in groups[f]]
+        elif sel.entity == "edge":
+            missing = set(sel.ids) - curves
+            if missing:
+                raise MeshError(f"edge id(s) {sorted(missing)} do not exist on this part")
+            named[EDGE + name] = list(sel.ids)
 
     x0, y0, z0, x1, y1, z1 = gmsh.model.getBoundingBox(-1, -1)
     dims = sorted([x1 - x0, y1 - y0, z1 - z0])
@@ -124,9 +132,12 @@ def _build_custom(gmsh, s) -> dict[str, list[int]]:
     # curvature of a faceted STL is noise; for CAD faces it resolves holes and fillets
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0 if is_stl else 12)
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0 if is_stl else 1)
-    named = {"fixed": expand(s.fixed_faces)}
+
+    named: dict[str, list[int]] = {}
+    for i, sup in enumerate(s.supports):
+        resolve(sup, f"sup{i}", named)
     for i, ld in enumerate(s.loads):
-        named[f"load{i}"] = expand(ld.faces)
+        resolve(ld, f"load{i}", named)
     return named
 
 
@@ -151,7 +162,7 @@ def mesh_study(spec) -> Mesh:
             named = BUILDERS[spec.template](gmsh, spec)
             for name, tags in named.items():
                 if not tags:
-                    raise RuntimeError(f"template {spec.template}: face '{name}' not found")
+                    raise RuntimeError(f"template {spec.template}: group '{name}' not found")
             gmsh.option.setNumber("Mesh.ElementOrder", 2)
             gmsh.option.setNumber("Mesh.SecondOrderLinear", 1)  # flat faces stay flat
             try:
@@ -179,17 +190,35 @@ def _extract(gmsh, named: dict[str, list[int]]) -> Mesh:
     index[tags.astype(np.int64)] = np.arange(len(tags))
     nodes = coords.reshape(-1, 3)
 
-    def elements(dim: int, etype: int, entity: int = -1) -> np.ndarray:
+    def elements(etype: int, entity: int = -1) -> np.ndarray:
         node_tags = gmsh.model.mesh.getElementsByType(etype, entity)[1]
-        n = 10 if etype == GMSH_TET10 else 6
+        n = {GMSH_TET10: 10, GMSH_TRI6: 6, GMSH_LINE3: 3}[etype]
         return index[node_tags.astype(np.int64)].reshape(-1, n)
 
-    faces = {
-        name: np.vstack([elements(2, GMSH_TRI6, t) for t in tags]) for name, tags in named.items()
-    }
-    return Mesh(
-        nodes=nodes,
-        tets=elements(3, GMSH_TET10),
-        faces=faces,
-        skin=elements(2, GMSH_TRI6),
-    )
+    tets = elements(GMSH_TET10)
+    corners = tets[:, :4]
+
+    def outward(tris: np.ndarray) -> np.ndarray:
+        """Flip a surface's triangles if they point into the volume.
+
+        One surface is consistently oriented, so one triangle decides: the
+        inside node of the tetrahedron that owns it must lie behind the normal.
+        """
+        if len(tris) == 0:
+            return tris
+        tri = tris[0, :3]
+        owner = corners[np.isin(corners, tri).sum(axis=1) == 3]
+        if len(owner):
+            inside = nodes[[v for v in owner[0] if v not in tri][0]]
+            a, b, c = nodes[tri]
+            if np.dot(np.cross(b - a, c - a), inside - a) > 0:
+                tris = tris[:, [0, 2, 1, 5, 4, 3]]
+        return tris
+
+    faces, edges = {}, {}
+    for name, group in named.items():
+        if name.startswith(EDGE):
+            edges[name[len(EDGE):]] = np.vstack([elements(GMSH_LINE3, t) for t in group])
+        else:
+            faces[name] = np.vstack([outward(elements(GMSH_TRI6, t)) for t in group])
+    return Mesh(nodes=nodes, tets=tets, faces=faces, edges=edges, skin=elements(GMSH_TRI6))

@@ -29,10 +29,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from . import __version__
-from .ai import Declined, NoValidSpec, explain_results, plan_study
+from .ai import Declined, NoValidSpec, explain_results, plan_part, plan_study
 from .convergence import run_convergence
 from .geometry import MeshError
 from .llm import LLMError, make_client
+from .loads import LoadError
 from .materials import MATERIALS
 from .parts import UNIT_SCALE, PartError, describe_part, save_upload
 from .solver import SolverError
@@ -76,6 +77,13 @@ def _ai_budget(request: Request) -> None:
 
 class PlanRequest(BaseModel):
     prompt: str
+
+
+class PlanPartRequest(BaseModel):
+    prompt: str
+    part_id: str
+    units: str = "mm"
+    mesh: str = "medium"
 
 
 class SimulateRequest(BaseModel):
@@ -150,6 +158,27 @@ def plan(req: PlanRequest, request: Request) -> dict:
     return {"spec": result.spec.model_dump(mode="json"), "attempts": result.attempts}
 
 
+@app.post("/api/plan_part")
+def plan_part_endpoint(req: PlanPartRequest, request: Request) -> dict:
+    if len(req.prompt) > 2000:
+        raise HTTPException(422, {"error": "Please keep the description under 2000 characters."})
+    if req.units not in UNIT_SCALE or req.mesh not in ("coarse", "medium", "fine"):
+        raise HTTPException(422, {"error": "invalid units or mesh level"})
+    try:
+        info = describe_part(req.part_id, req.units)
+    except PartError as e:
+        raise HTTPException(404, {"error": str(e)}) from e
+    _ai_budget(request)
+    try:
+        plan = plan_part(req.prompt, info, _client(), mesh=req.mesh)
+    except Declined as e:
+        raise HTTPException(422, {"declined": e.reason, "closest": e.closest}) from e
+    except (NoValidSpec, LLMError) as e:
+        raise HTTPException(422, {"error": str(e)}) from e
+    return {"spec": plan.spec.model_dump(mode="json"), "rationale": plan.rationale,
+            "attempts": plan.attempts}
+
+
 @app.post("/api/parts")
 async def upload_part(
     file: UploadFile = File(...),  # noqa: B008 - FastAPI dependency idiom
@@ -192,7 +221,7 @@ def simulate(req: SimulateRequest) -> dict:
         if req.convergence:
             return run_convergence(spec, work).to_dict()
         return run_study(spec, work).to_dict()
-    except (MeshError, PartError) as e:
+    except (MeshError, PartError, LoadError) as e:
         raise HTTPException(422, {"error": str(e)}) from e
     except SolverError as e:
         raise HTTPException(500, {"error": str(e)}) from e

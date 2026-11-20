@@ -112,7 +112,7 @@ export default function App() {
 
           {mode === "part" ? (
             <section>
-              <PartSetup materials={materials} busy={busy !== null} onSimulate={simulate}
+              <PartSetup materials={materials} busy={busy !== null} onSimulate={simulate} aiReady={aiReady}
                 stage={showSetupStage ? stageEl : null} />
             </section>
           ) : (

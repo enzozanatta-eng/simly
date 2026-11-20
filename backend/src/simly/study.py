@@ -46,7 +46,7 @@ def run_study(spec, work_dir: Path) -> StudyResult:
     mesh = mesh_study(spec)
     t1 = time.perf_counter()
 
-    constraints, forces = SETUP[spec.template](spec, mesh)
+    constraints, forces, marks = SETUP[spec.template](spec, mesh)
     write_input(work_dir / "job.inp", mesh, mat.youngs_modulus, mat.poisson_ratio,
                 constraints, forces)
     run_ccx(work_dir)
@@ -54,7 +54,15 @@ def run_study(spec, work_dir: Path) -> StudyResult:
     reaction = read_total_reaction(work_dir / "job.dat")
     t2 = time.perf_counter()
     applied = forces.sum(axis=0)
-    equilibrium_error = float(np.linalg.norm(reaction + applied) / np.linalg.norm(applied))
+    # load put directly on a held degree of freedom goes straight into the support
+    # and is not part of CalculiX's reaction, so balance the reaction against the rest
+    free = forces.copy()
+    for c in constraints:
+        for d in c.dofs:
+            free[c.nodes, d - 1] = 0.0
+    # relative to the total nodal force, so pure moments (zero resultant) work too
+    scale = float(np.linalg.norm(forces, axis=1).sum()) or 1.0
+    equilibrium_error = float(np.linalg.norm(reaction + free.sum(axis=0)) / scale)
 
     vm = res.von_mises
     disp_mag = np.linalg.norm(res.displacement, axis=1)
@@ -84,7 +92,7 @@ def run_study(spec, work_dir: Path) -> StudyResult:
         summary=summary,
         comparisons=comparisons,
         note=NOTES[spec.template],
-        display={**surface_display(mesh, res), **markers(mesh, forces, res)},
+        display={**surface_display(mesh, res), **markers(mesh, marks, res)},
         timings={"mesh_s": round(t1 - t0, 2), "solve_s": round(t2 - t1, 2)},
         tracked=[(c.quantity, c.unit, c.simulation) for c in comparisons] + [
             ("Max displacement", "mm", float(disp_mag.max())),
@@ -110,45 +118,27 @@ def surface_display(mesh: Mesh, res: FieldResult) -> dict:
     }
 
 
-def markers(mesh: Mesh, forces: np.ndarray, res: FieldResult) -> dict:
-    """Where to draw support and load symbols, and how loaded faces move."""
-    corners = mesh.tets[:, :4]
+def markers(mesh: Mesh, marks: list, res: FieldResult) -> dict:
+    """Where to draw support and load symbols, and how they move with the part."""
+    def vec(v):
+        return None if v is None else np.round(np.asarray(v, float), 6).tolist()
 
-    def face_info(face: str) -> tuple[np.ndarray, np.ndarray]:
-        tris = mesh.faces[face]
-        p = mesh.nodes
-        a, b, c = p[tris[:, 0]], p[tris[:, 1]], p[tris[:, 2]]
-        n = np.cross(b - a, c - a).sum(axis=0)
-        n /= np.linalg.norm(n) or 1.0
-        centre = p[np.unique(tris)].mean(axis=0)
-        # outward: away from the inside node of the tetrahedron that owns a face triangle
-        tri = tris[0, :3]
-        owner = corners[np.isin(corners, tri).sum(axis=1) == 3]
-        if len(owner):
-            inside = p[[v for v in owner[0] if v not in tri][0]]
-            if np.dot(n, inside - p[tri[0]]) > 0:
-                n = -n
-        return centre, n
-
-    loads = []
-    for name in sorted(k for k in mesh.faces if k.startswith("load")):
-        nodes = np.unique(mesh.faces[name])
-        f = forces[nodes].sum(axis=0)
-        centre, normal = face_info(name)
-        direction = f / (np.linalg.norm(f) or 1.0)
-        loads.append({
-            "centre": np.round(centre, 4).tolist(),
-            "direction": np.round(direction, 6).tolist(),
-            "pulling": bool(np.dot(direction, normal) > 0.5),
-            "magnitude_N": round(float(np.linalg.norm(f)), 4),
-            "displacement": np.round(res.displacement[nodes].mean(axis=0), 7).tolist(),
-        })
-    centre, normal = face_info("fixed")
-    return {
-        "loads": loads,
-        "fixed": [{"centre": np.round(centre, 4).tolist(), "normal": np.round(normal, 5).tolist()}],
-        "size": float(np.ptp(mesh.nodes, axis=0).max()),
-    }
+    loads, supports = [], []
+    for m in marks:
+        entry = {
+            "centre": np.round(m.centre, 4).tolist(),
+            "normal": vec(m.normal),
+            "entity": m.entity,
+            "displacement": np.round(res.displacement[m.nodes].mean(axis=0), 7).tolist(),
+        }
+        if m.kind == "support":
+            supports.append({**entry, "dofs": list(m.dofs)})
+        else:
+            mag = float(np.linalg.norm(m.vector))
+            loads.append({**entry, "kind": m.kind, "direction": vec(m.vector / (mag or 1.0)),
+                          "magnitude": round(mag, 4)})
+    return {"loads": loads, "fixed": supports,
+            "size": float(np.ptp(mesh.nodes, axis=0).max())}
 
 
 LINEAR_STRAIN_LIMIT = 0.05
