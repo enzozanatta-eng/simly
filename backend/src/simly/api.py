@@ -21,7 +21,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -84,6 +84,7 @@ class PlanPartRequest(BaseModel):
     part_id: str
     units: str = "mm"
     mesh: str = "medium"
+    gravity: Literal["-x", "+x", "-y", "+y", "-z", "+z"] = "-z"
 
 
 class SimulateRequest(BaseModel):
@@ -170,7 +171,7 @@ def plan_part_endpoint(req: PlanPartRequest, request: Request) -> dict:
         raise HTTPException(404, {"error": str(e)}) from e
     _ai_budget(request)
     try:
-        plan = plan_part(req.prompt, info, _client(), mesh=req.mesh)
+        plan = plan_part(req.prompt, info, _client(), mesh=req.mesh, gravity=req.gravity)
     except Declined as e:
         raise HTTPException(422, {"declined": e.reason, "closest": e.closest}) from e
     except (NoValidSpec, LLMError) as e:

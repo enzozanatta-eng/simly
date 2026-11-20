@@ -19,8 +19,12 @@ const KINDS: [Kind, string, string][] = [
   ["force", "Force", "N"], ["mass", "Weight of a mass", "kg"],
   ["pressure", "Pressure", "MPa"], ["moment", "Moment (torque)", "N·m"],
 ];
-const AXES: [Direction, string][] = [
-  ["-z", "−Z (down)"], ["+z", "+Z (up)"], ["+x", "+X"], ["-x", "−X"], ["+y", "+Y"], ["-y", "−Y"],
+const AXIS_ORDER: Direction[] = ["-z", "+z", "+x", "-x", "+y", "-y"];
+const opposite = (d: string) => `${d[0] === "+" ? "-" : "+"}${d[1]}` as Direction;
+/** Axis options, with "down"/"up" marked according to how the part sits in its file. */
+const axesFor = (up: string): [Direction, string][] => [
+  ...AXIS_ORDER.map((d): [Direction, string] => [d,
+    `${d[0] === "-" ? "−" : "+"}${d[1].toUpperCase()}${d === up ? " (up)" : d === opposite(up) ? " (down, gravity)" : ""}`]),
   ["custom", "Custom direction…"],
 ];
 const AXIS: Partial<Record<Direction, Vec3>> = {
@@ -78,6 +82,7 @@ export function PartSetup({ materials, busy, aiReady, stage, onSimulate }: Props
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [rationale, setRationale] = useState("");
+  const [up, setUp] = useState("+z");
 
   const faceById = useMemo(() => new Map(part?.faces.map((f) => [f.id, f]) ?? []), [part]);
   const edgeById = useMemo(() => new Map(part?.edges.map((e) => [e.id, e]) ?? []), [part]);
@@ -262,7 +267,8 @@ export function PartSetup({ materials, busy, aiReady, stage, onSimulate }: Props
     setAiBusy(true);
     setError("");
     try {
-      const plan = await api.planPart(aiPrompt, part.part_id, units, mesh);
+      const gravity = opposite(up);  // down is opposite to up
+      const plan = await api.planPart(aiPrompt, part.part_id, units, mesh, gravity);
       setSupports(plan.spec.supports.map((s) => ({ entity: s.entity, ids: s.ids, point: s.point, dofs: s.dofs })));
       setLoads(plan.spec.loads.map((l): LoadDraft => {
         const t = { entity: l.entity, ids: l.ids, point: l.point };
@@ -300,7 +306,11 @@ export function PartSetup({ materials, busy, aiReady, stage, onSimulate }: Props
     if (!hover) return "";
     if (hover.entity === "face") {
       const f = faceById.get(hover.id!);
-      return f ? `Face #${f.id} · ${Number(f.area_mm2.toPrecision(4)).toLocaleString()} mm² · facing ${directionName(f.normal)}` : "";
+      if (!f) return "";
+      if (f.kind === "hole" || f.kind === "cylinder") {
+        return `Face #${f.id} · ${f.kind === "hole" ? "hole" : "cylinder"} Ø${Number(f.diameter_mm!.toPrecision(3))} mm · axis ${directionName(f.axis!)}`;
+      }
+      return `Face #${f.id} · ${f.kind === "curved" ? "curved · " : ""}${Number(f.area_mm2.toPrecision(4)).toLocaleString()} mm²${f.kind === "plane" ? ` · facing ${directionName(f.normal)}` : ""}`;
     }
     if (hover.entity === "edge") {
       const e = edgeById.get(hover.id!);
@@ -361,6 +371,20 @@ export function PartSetup({ materials, busy, aiReady, stage, onSimulate }: Props
             <h2>Describe how it is held and loaded</h2>
             <textarea rows={3} value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)}
               placeholder="e.g. screwed to a wall through the hole; a 5 kg box sits on the top shelf; PETG" />
+            <label className="row-inline">
+              In this file, “up” is
+              <select value={up} onChange={(e) => {
+                const next = e.target.value;
+                // weights already placed follow the new "down"
+                setLoads((ls) => ls.map((l) => (l.kind === "mass" && l.direction === opposite(up)
+                  ? { ...l, direction: opposite(next) } : l)));
+                setUp(next);
+              }}>
+                <option value="+z">+Z (most CAD)</option><option value="+y">+Y</option>
+                <option value="-z">−Z</option><option value="-y">−Y</option>
+                <option value="+x">+X</option><option value="-x">−X</option>
+              </select>
+            </label>
             <button className="primary" disabled={!aiPrompt.trim() || aiBusy || !aiReady}
               title={aiReady ? "" : "Set OPENAI_API_KEY or ANTHROPIC_API_KEY on the server"} onClick={setupWithAI}>
               {aiBusy ? "Reading the part…" : "✦ Set up with AI"}
@@ -408,8 +432,8 @@ export function PartSetup({ materials, busy, aiReady, stage, onSimulate }: Props
               const kinds = KINDS.filter(([k]) => (k === "pressure" ? l.entity === "face" || isEmpty(l)
                 : k === "moment" ? l.entity !== "point" : true));
               const dirs: [Direction, string][] = l.kind === "moment"
-                ? [...(l.entity === "face" ? [["normal", "About the face normal (twist)"] as [Direction, string]] : []), ...AXES]
-                : [...(l.entity === "face" ? [["push", "Push into the face"], ["pull", "Pull out of the face"]] as [Direction, string][] : []), ...AXES];
+                ? [...(l.entity === "face" ? [["normal", "About the face normal (twist)"] as [Direction, string]] : []), ...axesFor(up)]
+                : [...(l.entity === "face" ? [["push", "Push into the face"], ["pull", "Pull out of the face"]] as [Direction, string][] : []), ...axesFor(up)];
               return (
                 <div key={i} className={`role-card load ${active.type === "load" && active.index === i ? "on" : ""}`}
                   onClick={() => activate({ type: "load", index: i })}>
@@ -424,7 +448,7 @@ export function PartSetup({ materials, busy, aiReady, stage, onSimulate }: Props
                     <select value={l.kind} onChange={(e) => {
                       const kind = e.target.value as Kind;
                       const direction: Direction = kind === "moment" ? (l.entity === "face" ? "normal" : "+z")
-                        : kind === "mass" ? "-z" : l.entity === "face" ? "push" : "-z";
+                        : kind === "mass" ? opposite(up) : l.entity === "face" ? "push" : "-z";
                       setLoads((ls) => ls.map((x, j) => (j === i ? { ...x, kind, direction } : x)));
                     }}>
                       {kinds.map(([k, label]) => <option key={k} value={k}>{label}</option>)}

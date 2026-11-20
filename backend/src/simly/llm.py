@@ -119,7 +119,8 @@ class AnthropicClient:
 
 
 class OpenAIClient:
-    default_model = "gpt-4.1-mini"
+    # spatial reasoning about parts needs a full-size model; set SIMLY_MODEL to change it
+    default_model = "gpt-4.1"
 
     def __init__(self, model: str | None = None):
         self._client = _import("openai").OpenAI()

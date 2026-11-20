@@ -140,43 +140,136 @@ def explain_results(request: str, result: dict, client: LLMClient) -> str:
 
 PART_PROMPT = f"""\
 You set up a structural simulation on a part the user uploaded to Simly.
-You get a list of the part's faces and edges (ids, sizes, positions, outward
-normals, all in mm) and the user's description of how the part is held and
-loaded. Decide which faces/edges/points are supported and which are loaded.
+You get the part's faces (type, size, position, outward normal, neighbours),
+its edges, the direction of gravity in the part's coordinates, and the user's
+description of how the part is held and loaded. Think about how the part sits
+in the real world before choosing faces.
 
-Rules:
-- Supports: "fixed" = dofs [1,2,3]. A face resting on a surface but free to slide
-  holds only the direction of its normal (e.g. dofs [3] for a face with normal +/-Z).
-  The part must be held well enough not to move as a rigid body.
-- Screws or bolts through a hole: support the hole's cylindrical face(s).
-- Loads: kind "force" (vector in N), "moment" (vector in N mm, right-hand rule,
-  on a face or edge), or "pressure" (MPa, on faces, pushing into them).
-- A mass of m kg resting or hanging gives a force of m * 9.81 N downwards (-Z),
-  unless the user says the part is oriented differently.
-- Loads spread over a face unless the user describes a point or an edge.
-- Point selections use coordinates in mm on the part's surface.
-- Materials (use the key): {"; ".join(f"{k} = {m.name}" for k, m in MATERIALS.items())}.
-  For "3D printed" with no filament named use pla.
-- Explain your choices briefly in "rationale", naming the faces you used.
-- If a proposal is rejected, read the reason and fix it.
+How to read the part:
+- "hole" faces are cylindrical holes (diameter and axis given). A through hole
+  opens onto two neighbouring plane faces: one is where the screw head or nut
+  sits, the other is pressed against whatever the part is screwed to.
+- The face pressed against a wall or floor faces AWAY from the rest of the part
+  (its outward normal points to the wall). E.g. for an L-shaped shelf bracket the
+  wall side of the vertical leg faces away from the horizontal shelf arm.
+
+Supports (dofs: 1 = x, 2 = y, 3 = z):
+- Bolted or screwed through a hole: support the hole face(s) as fixed [1,2,3],
+  and support the plane face pressed against the wall in the direction of its
+  normal only (contact: it cannot go into the wall). Never fix the face where
+  the screw head sits, or faces far from the fastening.
+- Clamped or glued: fix the clamped/glued faces.
+- Resting on a floor or table: hold the resting face in the vertical direction
+  only, plus enough small supports to stop sliding and spinning.
+- The part must not be able to move as a rigid body.
+
+Loads:
+- kind "force" (vector in N), "moment" (vector in N mm, right-hand rule, on a
+  face or edge) or "pressure" (MPa, faces only, pushing into them).
+- A weight (a mass of m kg resting on or hanging from the part): give
+  "weight_kg": m and NO vector. Simly turns it into m * 9.81 N along gravity
+  itself, whatever way the part is oriented in the file. Put it on the face it
+  rests on, spread over that face unless a point or edge is described.
+- Never load a face you also support.
+- A shelf, board, box or anything placed on the part rests on a large
+  upward-facing face: use the "Upward-facing faces" list, normally the largest
+  one on the arm that sticks out from the support, never the thin top edge of a
+  vertical leg. Items hanging from the part load the downward-facing face or
+  the hole they hang from.
+
+Materials (use the key): {"; ".join(f"{k} = {m.name}" for k, m in MATERIALS.items())}.
+For "3D printed" with no filament named use pla; if nothing is said, pla.
+
+In "rationale" (in the user's language), say in plain words which faces you used
+and why, describing them physically (e.g. "the hole", "the back of the vertical
+leg against the wall", "the top of the shelf arm"), with their ids.
+If a proposal is rejected, read the reason and fix it.
 """
 
+G = 9.81
+GRAVITY = {"-z": "-Z", "+z": "+Z", "-y": "-Y", "+y": "+Y", "-x": "-X", "+x": "+X"}
 
-def part_summary(info: dict, max_faces: int = 150, max_edges: int = 250) -> str:
-    """Compact text description of a part for the model."""
+
+def part_summary(info: dict, gravity: str = "-z", max_faces: int = 150,
+                 max_edges: int = 200) -> str:
+    """Compact, physically labelled description of a part for the model."""
     def v(x):
         return "(" + ", ".join(f"{c:.4g}" for c in x) + ")"
 
-    lines = [f"Bounding box (mm): min {v(info['bbox_mm']['min'])}, max {v(info['bbox_mm']['max'])}"]
-    lines.append("Faces: id | area mm2 | centroid | outward normal")
+    lo, hi = info["bbox_mm"]["min"], info["bbox_mm"]["max"]
+    down = gravity_vector(gravity)
+
+    def facing(sign: float) -> list[str]:
+        planes = [f for f in info["faces"] if f.get("kind", "plane") == "plane"
+                  and sum(f["normal"][i] * down[i] for i in range(3)) * sign < -0.9]
+        planes.sort(key=lambda f: -f["area_mm2"])
+        return [f"face {f['id']} ({f['area_mm2']:.4g} mm2, centre {v(f['centroid'])})"
+                for f in planes]
+
+    holes = [f for f in info["faces"] if f.get("kind") == "hole"]
+    lines = [
+        f"Gravity (down) in the part's coordinates: {GRAVITY.get(gravity, '-Z')}",
+        f"Bounding box (mm): min {v(lo)}, max {v(hi)}",
+        "Upward-facing faces (where objects can rest), largest first: "
+        + ("; ".join(facing(1.0)) or "none"),
+        "Downward-facing faces, largest first: " + ("; ".join(facing(-1.0)) or "none"),
+        "Holes: " + ("; ".join(
+            f"face {h['id']} (diameter {h['diameter_mm']:.3g} mm, axis {v(h['axis'])}, "
+            f"opens onto faces {h.get('neighbours', [])})" for h in holes) or "none"),
+        "Faces:",
+    ]
     for f in sorted(info["faces"], key=lambda f: -f["area_mm2"])[:max_faces]:
-        lines.append(f"  {f['id']} | {f['area_mm2']:.4g} | {v(f['centroid'])} | {v(f['normal'])}")
-    lines.append("Edges: id | length mm | midpoint | direction (straight edges) | faces it joins")
+        kind = f.get("kind", "plane")
+        if kind in ("hole", "cylinder"):
+            shape = (f"{kind} diameter {f['diameter_mm']:.3g} mm, length {f['length_mm']:.3g} mm, "
+                     f"axis {v(f['axis'])} through {v(f['axis_point'])}")
+        elif kind == "plane":
+            shape = f"plane, outward normal {v(f['normal'])}"
+        else:
+            shape = "curved surface"
+        lines.append(f"  face {f['id']}: {shape}; area {f['area_mm2']:.4g} mm2; centre "
+                     f"{v(f['centroid'])}; neighbours {f.get('neighbours', [])}")
+    lines.append("Edges (id, length mm, midpoint, direction if straight, faces it joins):")
     for e in sorted(info["edges"], key=lambda e: -e["length_mm"])[:max_edges]:
         d = v(e["direction"]) if e["direction"] else "curved"
         mid = v(e["midpoint"])
-        lines.append(f"  {e['id']} | {e['length_mm']:.4g} | {mid} | {d} | {e['faces']}")
+        lines.append(f"  edge {e['id']}: {e['length_mm']:.4g}, {mid}, {d}, {e['faces']}")
     return "\n".join(lines)
+
+
+def _load_schema() -> dict:
+    schema = inline_refs(Load.model_json_schema())
+    schema = {**schema, "properties": {**schema["properties"], "weight_kg": {
+        "type": "number", "exclusiveMinimum": 0,
+        "description": "mass in kg whose weight acts along gravity; use instead of vector"}}}
+    return schema
+
+
+def gravity_vector(gravity: str) -> list[float]:
+    """Unit vector pointing down, e.g. "-z" -> [0, 0, -1]."""
+    if len(gravity) != 2 or gravity[0] not in "+-" or gravity[1] not in "xyz":
+        raise ValueError(f"bad gravity direction {gravity!r}")
+    down = [0.0, 0.0, 0.0]
+    down["xyz".index(gravity[1])] = -1.0 if gravity[0] == "-" else 1.0
+    return down
+
+
+def resolve_weights(loads: list[dict], gravity: str) -> list[dict]:
+    """Turn {"weight_kg": m} loads into forces along gravity, so the model never
+    has to work out the sign of "down" in the file's coordinates."""
+    down = gravity_vector(gravity)
+    out = []
+    for ld in loads:
+        ld = dict(ld)
+        kg = ld.pop("weight_kg", None)
+        if kg is not None:
+            if not isinstance(kg, (int, float)) or kg <= 0:
+                raise ValueError("weight_kg must be a positive number")
+            ld["kind"] = "force"
+            ld.pop("pressure", None)
+            ld["vector"] = [c * kg * G for c in down]
+        out.append(ld)
+    return out
 
 
 def _part_tool() -> Tool:
@@ -184,7 +277,7 @@ def _part_tool() -> Tool:
         "type": "object",
         "properties": {
             "supports": {"type": "array", "items": inline_refs(Support.model_json_schema())},
-            "loads": {"type": "array", "items": inline_refs(Load.model_json_schema())},
+            "loads": {"type": "array", "items": _load_schema()},
             "material": {"type": "string", "enum": list(MATERIALS)},
             "rationale": {"type": "string"},
         },
@@ -204,10 +297,10 @@ class PartPlan:
 
 
 def plan_part(request: str, info: dict, client: LLMClient, mesh: str = "medium",
-              max_attempts: int = 3) -> PartPlan:
+              gravity: str = "-z", max_attempts: int = 3) -> PartPlan:
     face_ids = {f["id"] for f in info["faces"]}
     edge_ids = {e["id"] for e in info["edges"]}
-    history: list[Turn] = [UserText(f"{part_summary(info)}\n\nUser: {request}")]
+    history: list[Turn] = [UserText(f"{part_summary(info, gravity)}\n\nUser: {request}")]
     attempts: list[dict] = []
     for _ in range(max_attempts):
         call = client.call(PART_PROMPT, history, [PART_TOOL, DECLINE])
@@ -216,7 +309,7 @@ def plan_part(request: str, info: dict, client: LLMClient, mesh: str = "medium",
         try:
             spec = CustomPart(part_id=info["part_id"], units=info["units"], mesh=mesh,
                               supports=call.input.get("supports", []),
-                              loads=call.input.get("loads", []),
+                              loads=resolve_weights(call.input.get("loads", []), gravity),
                               material=call.input.get("material", "pla"))
             unknown = [
                 f"{sel.entity} {i}" for sel in [*spec.supports, *spec.loads] for i in sel.ids

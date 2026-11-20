@@ -83,6 +83,10 @@ export interface PartFace {
   area_mm2: number;
   centroid: number[];
   normal: number[];
+  kind: "plane" | "hole" | "cylinder" | "curved";
+  diameter_mm?: number;
+  axis?: number[];
+  neighbours: number[];
 }
 
 export interface PartEdge {

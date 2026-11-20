@@ -153,6 +153,52 @@ def winding_number(points: np.ndarray, tris: np.ndarray, nodes: np.ndarray) -> n
     return out
 
 
+def classify_face(tris: np.ndarray, nodes: np.ndarray, outward_sign: float) -> dict:
+    """Plane, cylinder (hole or boss, with diameter and axis) or other curved face.
+
+    Works from the surface mesh alone, so STL and STEP parts get the same answer.
+    ``outward_sign`` flips the triangle normals to point out of the part.
+    """
+    a, b, c = nodes[tris[:, 0]], nodes[tris[:, 1]], nodes[tris[:, 2]]
+    cross = np.cross(b - a, c - a) * outward_sign
+    area = np.linalg.norm(cross, axis=1)
+    n = cross / np.maximum(area, 1e-30)[:, None]
+    mean_n = (n * area[:, None]).sum(axis=0)
+    if np.linalg.norm(mean_n) / area.sum() > 0.999:
+        return {"kind": "plane"}
+
+    # a cylinder's normals all lie in the plane perpendicular to its axis
+    _, sv, vt = np.linalg.svd(n * np.sqrt(area)[:, None], full_matrices=False)
+    axis = vt[2]
+    if sv[2] / sv[0] > 0.25:  # faceted short cylinders still score well under this
+        return {"kind": "curved"}
+    pts = (a + b + c) / 3
+    e1 = np.cross(axis, [1.0, 0, 0] if abs(axis[0]) < 0.9 else [0, 1.0, 0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(axis, e1)
+    u, v = pts @ e1, pts @ e2
+    # algebraic circle fit: u^2 + v^2 = 2 cu u + 2 cv v + k
+    A = np.column_stack([2 * u, 2 * v, np.ones_like(u)])
+    (cu, cv, k), *_ = np.linalg.lstsq(A, u**2 + v**2, rcond=None)
+    radius = float(np.sqrt(max(k + cu**2 + cv**2, 0.0)))
+    spread = np.hypot(u - cu, v - cv)
+    if radius <= 0 or np.std(spread) / radius > 0.05:  # not round: some other curved face
+        return {"kind": "curved"}
+    centre = cu * e1 + cv * e2 + (pts @ axis).mean() * axis
+    radial = pts - centre - np.outer((pts - centre) @ axis, axis)
+    hole = float(np.sum(np.einsum("ij,ij->i", radial, n) * area)) < 0
+    if axis[np.argmax(np.abs(axis))] < 0:  # report the axis pointing along +x, +y or +z
+        axis = -axis
+    span = float(np.ptp(pts @ axis))
+    return {
+        "kind": "hole" if hole else "cylinder",
+        "diameter_mm": round(2 * radius, 3),
+        "axis": np.round(axis, 4).tolist(),
+        "axis_point": np.round(centre, 4).tolist(),
+        "length_mm": round(span, 3),
+    }
+
+
 def face_groups(part_id: str) -> dict[int, list[int]] | None:
     f = part_file(part_id).parent / "faces.json"
     if not f.exists():
@@ -251,22 +297,31 @@ def describe_part(part_id: str, units: str = "mm") -> dict:
                 normal = cross.sum(axis=0)
                 normal = normal / (np.linalg.norm(normal) or 1.0)
                 centroid = ((a + b + c) / 3 * areas[:, None]).sum(axis=0) / areas.sum()
-                # orient outwards: a point just off the biggest triangle along the
-                # normal must be outside the solid (winding number near 0)
+                # orient outwards: a point just off the biggest triangle, along that
+                # triangle's own normal, must be outside the solid (winding number ~0).
+                # (The mean normal of a cylinder is ~0, so it cannot be used for this.)
                 big = int(np.argmax(areas))
-                probe = (a[big] + b[big] + c[big]) / 3 + 1e-3 * diag * normal
-                if winding_number(probe[None], all_tris, nodes)[0] > 0.5:
-                    normal = -normal
+                n_big = cross[big] / (np.linalg.norm(cross[big]) or 1.0)
+                probe = (a[big] + b[big] + c[big]) / 3 + 1e-3 * diag * n_big
+                sign = -1.0 if winding_number(probe[None], all_tris, nodes)[0] > 0.5 else 1.0
+                normal = sign * normal
                 faces.append({
                     "id": fid,
                     "area_mm2": round(float(areas.sum()), 4),
                     "centroid": np.round(centroid, 4).tolist(),
                     "normal": np.round(normal, 5).tolist(),
+                    **classify_face(tris, nodes, sign),
                 })
                 positions_idx.append(tris)
                 face_of_tri += [fid] * len(tris)
             edges, edge_segments, edge_of_segment, vertices = _feature_edges(
                 gmsh, groups, nodes, index, scale)
+            neighbours: dict[int, set[int]] = {f["id"]: set() for f in faces}
+            for e in edges:
+                for f in e["faces"]:
+                    neighbours.setdefault(f, set()).update(x for x in e["faces"] if x != f)
+            for f in faces:
+                f["neighbours"] = sorted(neighbours.get(f["id"], ()))
         finally:
             gmsh.finalize()
 

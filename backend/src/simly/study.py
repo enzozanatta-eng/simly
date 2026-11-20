@@ -54,15 +54,17 @@ def run_study(spec, work_dir: Path) -> StudyResult:
     reaction = read_total_reaction(work_dir / "job.dat")
     t2 = time.perf_counter()
     applied = forces.sum(axis=0)
-    # load put directly on a held degree of freedom goes straight into the support
-    # and is not part of CalculiX's reaction, so balance the reaction against the rest
-    free = forces.copy()
+    # CalculiX's RF on the supported nodes is their internal force K*u, which also
+    # contains any load applied right on those nodes (in held or free directions).
+    # The sum of K*u over all nodes is zero, so RF must balance the loads on the
+    # other nodes; the true support reaction is RF minus the loads on its own nodes.
+    on_support = np.zeros(len(forces), dtype=bool)
     for c in constraints:
-        for d in c.dofs:
-            free[c.nodes, d - 1] = 0.0
+        on_support[c.nodes] = True
+    reaction = reaction - forces[on_support].sum(axis=0)
     # relative to the total nodal force, so pure moments (zero resultant) work too
     scale = float(np.linalg.norm(forces, axis=1).sum()) or 1.0
-    equilibrium_error = float(np.linalg.norm(reaction + free.sum(axis=0)) / scale)
+    equilibrium_error = float(np.linalg.norm(reaction + applied) / scale)
 
     vm = res.von_mises
     disp_mag = np.linalg.norm(res.displacement, axis=1)

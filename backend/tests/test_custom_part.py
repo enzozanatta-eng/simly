@@ -236,4 +236,80 @@ def test_ai_sets_up_an_uploaded_part(tmp_path):
     assert "Clamped" in plan.rationale
     assert "999" in plan.attempts[0]["error"]
     assert isinstance(llm.seen[1][-1], ToolResult)
-    assert f"\n  {tip} |" in llm.seen[0][0].text  # the model sees the part's faces
+    assert f"\n  face {tip}: plane" in llm.seen[0][0].text  # the model sees the part's faces
+
+
+@pytest.mark.parametrize("suffix", [".step", ".stl"])
+def test_hole_and_cylinder_are_recognised(tmp_path, suffix):
+    bracket = describe_part(upload(tmp_path, suffix, "bracket"))
+    (hole,) = [f for f in bracket["faces"] if f["kind"] == "hole"]
+    assert hole["diameter_mm"] == pytest.approx(10, rel=0.08)  # faceted circle
+    assert hole["axis"] == pytest.approx([1, 0, 0], abs=0.01)
+    assert len(hole["neighbours"]) == 2  # the two faces the hole opens onto
+    shaft = describe_part(upload(tmp_path, suffix, "shaft"))
+    (side,) = [f for f in shaft["faces"] if f["kind"] != "plane"]
+    assert side["kind"] == "cylinder" and side["diameter_mm"] == pytest.approx(20, rel=0.08)
+
+
+def test_summary_labels_holes_and_gravity(tmp_path):
+    from simly.ai import part_summary
+
+    text = part_summary(describe_part(upload(tmp_path, ".step", "bracket")), gravity="-y")
+    assert "Gravity (down) in the part's coordinates: -Y" in text
+    assert "hole diameter" in text and "neighbours" in text
+
+
+def test_summary_ranks_resting_faces(tmp_path):
+    from simly.ai import part_summary
+
+    text = part_summary(describe_part(upload(tmp_path, ".step", "bracket")), gravity="-z")
+    up = next(line for line in text.splitlines() if line.startswith("Upward-facing"))
+    # the top of the horizontal arm (2960 mm2) comes before the top of the leg (240 mm2)
+    assert up.index("2960") < up.index("240 mm2")
+
+
+@pytest.mark.parametrize("gravity, expected", [("-z", [0, 0, -490.5]), ("+z", [0, 0, 490.5]),
+                                               ("-y", [0, -490.5, 0])])
+def test_weight_follows_gravity_whatever_the_orientation(gravity, expected):
+    """The model gives kilograms; Simly picks the sign of "down" for the file."""
+    from simly.ai import resolve_weights
+
+    (ld,) = resolve_weights([{"entity": "face", "ids": [3], "weight_kg": 50}], gravity)
+    assert ld["kind"] == "force" and "weight_kg" not in ld
+    assert ld["vector"] == pytest.approx(expected)
+    with pytest.raises(ValueError):
+        resolve_weights([{"entity": "face", "ids": [3], "weight_kg": -1}], gravity)
+
+
+def test_ai_weight_on_an_upside_down_part(tmp_path):
+    from simly.ai import plan_part
+    from simly.llm import ToolCall
+
+    info = describe_part(upload(tmp_path, ".step"))
+    fixed, tip = face_at(info, 0, 0.0), face_at(info, 0, 1000.0)
+
+    class Scripted:
+        def call(self, system, history, tools):
+            assert "weight_kg" in str(tools[0].input_schema)
+            return ToolCall("a", "propose_part_setup", {
+                "supports": [{"entity": "face", "ids": [fixed]}],
+                "loads": [{"entity": "face", "ids": [tip], "weight_kg": 10}],
+                "material": "pla", "rationale": "ok"})
+
+    plan = plan_part("10 kg at the tip", info, Scripted(), gravity="+z")
+    assert plan.spec.loads[0].vector == pytest.approx([0, 0, 98.1])
+
+
+def test_equilibrium_when_the_load_touches_a_contact_support(tmp_path):
+    """Load on the top of the leg shares an edge with the wall face held in X only:
+    CalculiX's RF there also carries the applied Z load, which must not read as an error."""
+    info = describe_part(upload(tmp_path, ".step", "bracket"))
+    hole = next(f["id"] for f in info["faces"] if f["kind"] == "hole")
+    back, top = face_at(info, 0, 0.0), face_at(info, 2, 60.0)
+    spec = CustomPart(part_id=info["part_id"],
+                      supports=[{"entity": "face", "ids": [hole]},
+                                {"entity": "face", "ids": [back], "dofs": [1]}],
+                      loads=[{"entity": "face", "ids": [top], "vector": [0, 0, -491]}])
+    res = run_study(spec, tmp_path / "run")
+    assert res.summary["equilibrium_error_pct"] < 1e-3
+    assert res.summary["reaction_N"] == pytest.approx([0, 0, 491], abs=0.01)
